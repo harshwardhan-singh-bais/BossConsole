@@ -1,6 +1,7 @@
 package ai.rever.boss.mcp
 
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
+import ai.rever.boss.mcp.rlm.RlmToolProvider
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
 import ai.rever.boss.mcp.sandbox.McpRiskLevel
 import ai.rever.boss.plugin.api.McpToolArgs
@@ -129,6 +130,9 @@ object McpToolRegistryImpl : McpToolRegistry {
         registerProvider(SnippetMcpToolProvider)
         registerProvider(NotificationMcpToolProvider)
         registerProvider(IntrospectionMcpToolProvider)
+        // Registered alongside the workspace tools rather than inside them: the RLM surface
+        // has its own provider id, so one `providerRules` entry trusts or withholds all of it.
+        registerProvider(RlmToolProvider)
     }
 
     override val allTools: StateFlow<List<RegisteredMcpTool>> get() = core.allTools

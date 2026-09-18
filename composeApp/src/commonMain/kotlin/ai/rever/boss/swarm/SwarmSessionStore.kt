@@ -68,6 +68,16 @@ class SwarmSessionStore(
         Json {
             ignoreUnknownKeys = true
             prettyPrint = true
+            // encodeDefaults is load-bearing, and specifically for `version`. That field carries a
+            // default, and kotlinx omits defaulted fields unless told otherwise - so without this
+            // the version marker the whole format depends on is absent from every journal ever
+            // written. A reader still tolerates its absence (the default covers that), but a writer
+            // that never states it makes the versioning decorative.
+            //
+            // Note this is the OPPOSITE of the operation ledger's choice, and deliberately so: the
+            // ledger must NOT encode defaults, because re-encoding a historical record has to
+            // reproduce its hash byte for byte. Here nothing is hashed and explicit is better.
+            encodeDefaults = true
         }
 
     /** The resolved journal path, for operator-facing inspection, or null when not persisting. */
