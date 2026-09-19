@@ -134,7 +134,14 @@ private fun RlmTreeRow(
         Text(
             // A run header gets its own bullet so the eye can find where one tree ends and the
             // next begins - without it a 24-node tree followed by another reads as one list.
-            text = if (row.isError) "✕" else if (row.isRoot) "•" else "·",
+            text =
+                if (row.isError) {
+                    "✕"
+                } else if (row.isRoot) {
+                    "•"
+                } else {
+                    "·"
+                },
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = if (row.isError) colors.alert else colors.textSecondary,

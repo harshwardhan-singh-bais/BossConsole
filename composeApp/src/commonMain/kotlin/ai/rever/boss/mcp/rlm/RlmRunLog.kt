@@ -135,6 +135,7 @@ fun buildRlmDisplayRows(runs: List<RlmRunResult>): List<RlmDisplayRow> {
                 isError = run.root.isError,
                 isRoot = true,
             )
+
         fun walk(
             node: RlmNode,
             indent: Int,

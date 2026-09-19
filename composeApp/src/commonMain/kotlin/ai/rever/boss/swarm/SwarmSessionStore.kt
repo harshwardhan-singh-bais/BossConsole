@@ -97,8 +97,7 @@ class SwarmSessionStore(
      */
     @Suppress("TooGenericExceptionCaught") // A journal fault is reported, not thrown at the UI.
     fun load(): List<SwarmSession> {
-        val file = storeFile ?: return emptyList()
-        if (!file.exists()) return emptyList()
+        val file = storeFile?.takeIf { it.exists() } ?: return emptyList()
         return try {
             json.decodeFromString<SwarmSessionsDocument>(file.readText()).sessions
         } catch (t: Exception) {

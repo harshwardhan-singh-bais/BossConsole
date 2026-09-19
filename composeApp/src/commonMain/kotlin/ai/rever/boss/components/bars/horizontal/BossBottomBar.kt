@@ -1,3 +1,5 @@
+@file:Suppress("TooManyFunctions") // Status-bar items and their dialogs are one cohesive file.
+
 package ai.rever.boss.components.bars.horizontal
 
 import ai.rever.boss.components.bars.ChromeBar

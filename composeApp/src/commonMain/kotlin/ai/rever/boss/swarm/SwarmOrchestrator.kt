@@ -12,10 +12,14 @@ import kotlinx.coroutines.flow.StateFlow
  */
 sealed interface SwarmCommandResult {
     /** The session as it now stands, which is the authoritative post-change state. */
-    data class Ok(val session: SwarmSession) : SwarmCommandResult
+    data class Ok(
+        val session: SwarmSession,
+    ) : SwarmCommandResult
 
     /** A human-readable reason the change did not happen, already fit to show in a dialog. */
-    data class Failed(val message: String) : SwarmCommandResult
+    data class Failed(
+        val message: String,
+    ) : SwarmCommandResult
 }
 
 /**
@@ -55,7 +59,10 @@ interface SwarmOrchestrator {
     ): SwarmCommandResult
 
     /** Sends [prompt] to the agent attached to [worktreeId]. */
-    suspend fun sendTask(worktreeId: String, prompt: String): SwarmCommandResult
+    suspend fun sendTask(
+        worktreeId: String,
+        prompt: String,
+    ): SwarmCommandResult
 
     /** Stops the agent in [worktreeId] and leaves the worktree on disk. */
     suspend fun kill(worktreeId: String): SwarmCommandResult

@@ -21,7 +21,7 @@ class RlmRunLogTest {
     fun `the log keeps the newest run first and drops the oldest`() {
         val log = RlmRunLog(capacity = 3)
 
-        (1..5).forEach { log.record(run(node(it, 1))) }
+        for (id in 1..5) log.record(run(node(id, 1)))
 
         assertEquals(listOf(5, 4, 3), log.runs.value.map { it.root.id })
     }
@@ -30,7 +30,7 @@ class RlmRunLogTest {
     fun `the log is bounded by its capacity`() {
         val log = RlmRunLog(capacity = 2)
 
-        (1..10).forEach { log.record(run(node(it, 1))) }
+        for (id in 1..10) log.record(run(node(id, 1)))
 
         assertEquals(2, log.runs.value.size)
     }
@@ -149,7 +149,15 @@ class RlmRunLogTest {
 
         val rows = buildRlmDisplayRows(listOf(tree))
 
-        assertEquals(listOf(0 to "Run 1", 1 to "root", 2 to "child", 3 to "hello", 3 to "world"), rows.map { it.indent to it.label })
+        val expected =
+            listOf(
+                0 to "Run 1",
+                1 to "root",
+                2 to "child",
+                3 to "hello",
+                3 to "world",
+            )
+        assertEquals(expected, rows.map { it.indent to it.label })
         assertTrue(rows.first().isRoot)
         assertTrue(rows.drop(1).none { it.isRoot })
     }
