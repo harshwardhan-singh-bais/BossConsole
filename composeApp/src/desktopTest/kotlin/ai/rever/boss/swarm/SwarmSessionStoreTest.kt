@@ -48,14 +48,16 @@ class SwarmSessionStoreTest {
         worktrees = worktrees,
     )
 
-    private fun worktree(id: String, status: SwarmWorktreeStatus) =
-        SwarmWorktree(
-            id = id,
-            branchName = "swarm/session-1-1",
-            path = "/tmp/worktree-1",
-            agentKind = SwarmAgentKind.CLAUDE_CODE,
-            status = status,
-        )
+    private fun worktree(
+        id: String,
+        status: SwarmWorktreeStatus,
+    ) = SwarmWorktree(
+        id = id,
+        branchName = "swarm/session-1-1",
+        path = "/tmp/worktree-1",
+        agentKind = SwarmAgentKind.CLAUDE_CODE,
+        status = status,
+    )
 
     @Test
     fun `a session round-trips through the journal`() {

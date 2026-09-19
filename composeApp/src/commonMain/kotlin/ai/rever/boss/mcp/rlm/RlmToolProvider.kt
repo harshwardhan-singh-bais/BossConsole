@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -101,14 +102,13 @@ object RlmToolProvider : McpToolProvider {
             val request =
                 try {
                     requestJson.decodeFromString<RlmQuery>(args.raw)
-                } catch (t: Throwable) {
+                } catch (e: SerializationException) {
                     // Reported rather than treated as an empty query: "could not parse" and
                     // "ran and found nothing" must not look alike to the caller.
-                    return@withContext McpToolResult(
-                        "$TOOL_NAME could not parse its arguments: ${t.message ?: t::class.simpleName}. " +
-                            "Expected a JSON object with an 'action' field.",
-                        isError = true,
-                    )
+                    return@withContext parseFailureResult(e)
+                } catch (e: IllegalArgumentException) {
+                    // kotlinx raises this for malformed JSON content on some paths; same answer.
+                    return@withContext parseFailureResult(e)
                 }
             val run = RlmCodebaseEngine(invoker = RegistryRlmToolInvoker).run(request)
             // Recorded before rendering, so the operator's tree view and the agent's answer are
@@ -118,6 +118,17 @@ object RlmToolProvider : McpToolProvider {
             // child hit a missing delegate is a partial answer, and the tree says so in place.
             McpToolResult(run.render(), isError = run.root.isError)
         }
+
+    /**
+     * The one answer a malformed request can get: named, not silent, and never confused
+     * with a query that ran and found nothing.
+     */
+    private fun parseFailureResult(e: Exception): McpToolResult =
+        McpToolResult(
+            "$TOOL_NAME could not parse its arguments: ${e.message ?: e::class.simpleName}. " +
+                "Expected a JSON object with an 'action' field.",
+            isError = true,
+        )
 
     private object RegistryRlmToolInvoker : RlmToolInvoker {
         /**
@@ -145,7 +156,8 @@ object RlmToolProvider : McpToolProvider {
             },
             "path": {
               "type": "string",
-              "description": "READ_RANGE/LIST_TREE: file or directory to act on. LIST_TREE defaults to the open project root when omitted."
+              "description":
+                "READ_RANGE/LIST_TREE: file or directory to act on. LIST_TREE defaults to the open project root when omitted."
             },
             "startLine": {
               "type": "integer",
@@ -174,7 +186,8 @@ object RlmToolProvider : McpToolProvider {
             "subqueries": {
               "type": "array",
               "items": { "type": "object" },
-              "description": "SUBQUERY: child queries, each an object of this same shape. Nesting is capped at depth 3 and the whole call at 24 nodes."
+              "description":
+                "SUBQUERY: child queries, each an object of this same shape. Nesting is capped at depth 3 and the whole call at 24 nodes."
             }
           },
           "required": ["action"]

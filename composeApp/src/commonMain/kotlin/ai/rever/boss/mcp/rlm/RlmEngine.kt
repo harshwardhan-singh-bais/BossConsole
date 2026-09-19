@@ -170,11 +170,20 @@ data class RlmRunResult(
         sb.append(pad)
         sb.append(if (isError) "! " else "- ")
         sb.append(label)
-        sb.append(" [d").append(depth).append(", #").append(id).append(']')
+        sb
+            .append(" [d")
+            .append(depth)
+            .append(", #")
+            .append(id)
+            .append(']')
         delegate?.let { sb.append(" -> ").append(it) }
         sb.append('\n')
         text.lineSequence().forEach { line ->
-            sb.append(pad).append("    ").append(line).append('\n')
+            sb
+                .append(pad)
+                .append("    ")
+                .append(line)
+                .append('\n')
         }
         children.forEach { it.renderInto(sb, indent + 1) }
     }
@@ -221,6 +230,10 @@ class RlmCodebaseEngine(
         )
     }
 
+    // Every branch of the action dispatch returns its own node; the two refusal guards
+    // ahead of it are the same shape. Splitting them into helpers would thread id/depth/
+    // budget through all of them for no gain, so the third return is deliberate.
+    @Suppress("ReturnCount")
     private suspend fun execute(
         query: RlmQuery,
         depth: Int,
@@ -272,14 +285,18 @@ class RlmCodebaseEngine(
      * the range being unreachable through this delegate rather than as an empty read, since
      * those two mean very different things to whoever asked.
      */
+    // Missing-path refusal, delegate-error propagation and the success node are three
+    // distinct returns; collapsing them would nest the happy path two levels deep.
+    @Suppress("ReturnCount")
     private suspend fun readRange(
         id: Int,
         depth: Int,
         query: RlmQuery,
         cache: RlmDelegateCache,
     ): RlmNode {
-        val path = query.path?.takeIf { it.isNotBlank() }
-            ?: return errorNode(id, depth, RlmAction.READ_RANGE, DELEGATE_READ, "READ_RANGE requires 'path'.")
+        val path =
+            query.path?.takeIf { it.isNotBlank() }
+                ?: return errorNode(id, depth, RlmAction.READ_RANGE, DELEGATE_READ, "READ_RANGE requires 'path'.")
         val answer = callDelegate(cache, DELEGATE_READ, buildJsonObject { put("path", path) })
         if (answer.result.isError) {
             return errorNode(id, depth, RlmAction.READ_RANGE, DELEGATE_READ, answer.result.text)
@@ -307,8 +324,9 @@ class RlmCodebaseEngine(
         query: RlmQuery,
         cache: RlmDelegateCache,
     ): RlmNode {
-        val needle = query.query?.takeIf { it.isNotBlank() }
-            ?: return errorNode(id, depth, RlmAction.GREP, DELEGATE_GREP, "GREP requires 'query'.")
+        val needle =
+            query.query?.takeIf { it.isNotBlank() }
+                ?: return errorNode(id, depth, RlmAction.GREP, DELEGATE_GREP, "GREP requires 'query'.")
         val args =
             buildJsonObject {
                 put("query", needle)
@@ -380,7 +398,9 @@ class RlmCodebaseEngine(
             )
         }
         return when (val plan = planner.plan(query, depth)) {
-            is RlmPlan.Unavailable -> errorNode(id, depth, RlmAction.SUBQUERY, null, plan.reason)
+            is RlmPlan.Unavailable -> {
+                errorNode(id, depth, RlmAction.SUBQUERY, null, plan.reason)
+            }
 
             is RlmPlan.Planned -> {
                 if (plan.queries.isEmpty()) {
@@ -483,6 +503,9 @@ class RlmCodebaseEngine(
          * file the delegate returned 900 lines of needs to know it got a partial answer
          * because `codebase_read` truncates, not because the file ends there.
          */
+        // Fast path, unreachable-range report and the slice are three returns; the guard
+        // clauses keep the actual slicing arithmetic at the end, flat and readable.
+        @Suppress("ReturnCount")
         fun sliceLines(
             text: String,
             startLine: Int,

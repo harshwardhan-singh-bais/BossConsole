@@ -82,7 +82,11 @@ class RlmEngineTest {
 
             assertEquals(
                 RlmLimits.DEFAULT_GREP_RESULTS,
-                invoker.calls.single().args["maxResults"]?.jsonPrimitive?.int,
+                invoker.calls
+                    .single()
+                    .args["maxResults"]
+                    ?.jsonPrimitive
+                    ?.int,
             )
         }
 
@@ -173,7 +177,10 @@ class RlmEngineTest {
                                 action = "SUBQUERY",
                                 subqueries =
                                     listOf(
-                                        RlmQuery(action = "SUBQUERY", subqueries = listOf(RlmQuery(action = "LIST_TREE"))),
+                                        RlmQuery(
+                                            action = "SUBQUERY",
+                                            subqueries = listOf(RlmQuery(action = "LIST_TREE")),
+                                        ),
                                     ),
                             ),
                         ),
@@ -181,14 +188,18 @@ class RlmEngineTest {
 
             val run = RlmCodebaseEngine(invoker).run(root)
 
-            val depth3 = run.root.children.single().children.single()
+            val depth3 =
+                run.root.children
+                    .single()
+                    .children
+                    .single()
             assertEquals(3, depth3.depth)
             assertTrue(depth3.isError)
             assertTrue(depth3.text.contains("SUBQUERY refused"), depth3.text)
             assertTrue(depth3.text.contains("depth 3"), depth3.text)
             assertTrue(
                 invoker.calls.isEmpty(),
-                "the leaf under a refused SUBQUERY must not be executed - the cap has to bite before the work, not after",
+                "the leaf under a refused SUBQUERY must not run - the cap has to bite before the work, not after",
             )
         }
 
