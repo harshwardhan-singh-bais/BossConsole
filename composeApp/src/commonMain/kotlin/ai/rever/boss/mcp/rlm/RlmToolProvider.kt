@@ -262,12 +262,18 @@ internal fun nestingExceeds(
             continue
         }
         when (c) {
-            '"' -> inString = true
+            '"' -> {
+                inString = true
+            }
+
             '{', '[' -> {
                 depth += 1
                 if (depth > limit) return true
             }
-            '}', ']' -> depth = (depth - 1).coerceAtLeast(0)
+
+            '}', ']' -> {
+                depth = (depth - 1).coerceAtLeast(0)
+            }
         }
     }
     return false

@@ -158,7 +158,10 @@ class SwarmSessionStoreTest {
         // A directory where the journal belongs, so the replace cannot land. The point of the case
         // is the return value: a caller that got the merged list with no failure would read it as
         // "this is on disk now", and the fault flow is not something every caller collects.
-        val dir = kotlin.io.path.createTempDirectory("swarm-store-unwritable").toFile()
+        val dir =
+            kotlin.io.path
+                .createTempDirectory("swarm-store-unwritable")
+                .toFile()
         tempFiles.add(File(dir, "swarm-sessions.json"))
         val unwritable = File(dir, "swarm-sessions.json").apply { mkdirs() }
         val store = SwarmSessionStore(unwritable)
@@ -206,7 +209,10 @@ class SwarmSessionStoreTest {
 
         // An Unwritable is the opposite case: parsing the file says nothing about whether the write
         // that failed has since landed, so a read must leave it standing.
-        val dir = kotlin.io.path.createTempDirectory("swarm-store-still-unwritable").toFile()
+        val dir =
+            kotlin.io.path
+                .createTempDirectory("swarm-store-still-unwritable")
+                .toFile()
         tempFiles.add(File(dir, "swarm-sessions.json"))
         val unwritable = File(dir, "swarm-sessions.json").apply { mkdirs() }
         val broken = SwarmSessionStore(unwritable)

@@ -141,7 +141,12 @@ class SwarmSessionStore(
             sessions
         } catch (t: Exception) {
             val error = t.message ?: t::class.simpleName ?: "unknown error"
-            _fault.value = SwarmStoreFault.Unreadable(file.path, error)
+            // A write failure is more actionable than a read failure when both are possible: a
+            // later read of the path cannot prove that the failed write landed, so it must not
+            // replace the write fault with a read fault.
+            if (_fault.value !is SwarmStoreFault.Unwritable) {
+                _fault.value = SwarmStoreFault.Unreadable(file.path, error)
+            }
             logger.error(
                 LogCategory.SYSTEM,
                 "Failed to parse swarm session journal",
