@@ -1,11 +1,15 @@
 package ai.rever.boss.components.dialogs
 
+import ai.rever.boss.components.bars.getPanelScrollbarConfig
+import ai.rever.boss.components.bars.lazyListScrollbar
 import ai.rever.boss.mcp.rlm.RlmDisplayRow
+import ai.rever.boss.mcp.rlm.RlmLimits
 import ai.rever.boss.mcp.rlm.RlmRunResult
 import ai.rever.boss.mcp.rlm.buildRlmDisplayRows
 import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,12 +20,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -49,13 +55,21 @@ import androidx.compose.ui.window.DialogProperties
  * the dialog is open appears without reopening it.
  *
  * Rendered from a flattened row list rather than nested composables, so the tree's shape is
- * asserted in a plain unit test (see `RlmRunLogTest`) and this file only draws.
+ * asserted in a plain unit test (see `RlmRunLogTest`) and this file only draws. The list itself is
+ * lazy and carries a scrollbar that only draws when there is something to scroll: eagerly composing
+ * up to `RlmRunLog.DEFAULT_CAPACITY` runs of `RlmLimits.MAX_NODES` nodes is an order of magnitude
+ * more than the activity log's hundred flat records.
+ *
+ * [onClear] empties the run log this dialog reads. That log is in-memory and session-scoped, so
+ * clearing it is a normal thing to want, and offering it here is what keeps `RlmRunLog.clear` from
+ * being API nothing can reach.
  */
 @Composable
 @Suppress("LongMethod") // Declarative Compose layout.
 fun RlmQueryTreeDialog(
     runs: List<RlmRunResult>,
     onDismiss: () -> Unit,
+    onClear: () -> Unit,
 ) {
     val windowSize = LocalWindowInfo.current.containerSize
     val windowHeight = with(LocalDensity.current) { windowSize.height.toDp() }
@@ -65,6 +79,7 @@ fun RlmQueryTreeDialog(
     val colors = BossTheme.colors
     val radii = BossTheme.radius
     val rows = remember(runs) { buildRlmDisplayRows(runs) }
+    val listState = rememberLazyListState()
 
     BossDialog(
         onDismissRequest = onDismiss,
@@ -76,33 +91,45 @@ fun RlmQueryTreeDialog(
             color = colors.panel,
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "RLM Query Trees",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.textPrimary,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text =
+                        "Recursive codebase queries from this session, newest first, with the tree each " +
+                            "one executed. Depth is capped at ${RlmLimits.MAX_DEPTH} and a single query at " +
+                            "${RlmLimits.MAX_NODES} nodes, so a run marked TRUNCATED stopped at that " +
+                            "budget rather than finishing. Every node named here was also policy-checked " +
+                            "and recorded in the MCP ledger on its own.",
+                    fontSize = 12.sp,
+                    color = colors.textSecondary,
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (rows.isEmpty()) {
                     Text(
-                        text = "RLM Query Trees",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.textPrimary,
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text =
-                            "Recursive codebase queries from this session, newest first, with the tree each " +
-                                "one executed. Depth is capped at 3 and a single query at 24 nodes, so a run " +
-                                "marked TRUNCATED stopped at that budget rather than finishing. Every node " +
-                                "named here was also policy-checked and recorded in the MCP ledger on its own.",
-                        fontSize = 12.sp,
+                        text = "No recursive codebase queries have run yet this session.",
+                        fontSize = 13.sp,
                         color = colors.textSecondary,
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    if (rows.isEmpty()) {
-                        Text(
-                            text = "No recursive codebase queries have run yet this session.",
-                            fontSize = 13.sp,
-                            color = colors.textSecondary,
-                        )
-                    } else {
-                        rows.forEach { row -> RlmTreeRow(row, colors) }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier =
+                            Modifier
+                                .weight(1f, fill = false)
+                                .fillMaxWidth()
+                                .lazyListScrollbar(
+                                    listState = listState,
+                                    direction = Orientation.Vertical,
+                                    config = getPanelScrollbarConfig(),
+                                ),
+                    ) {
+                        items(rows) { row -> RlmTreeRow(row, colors) }
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -110,6 +137,11 @@ fun RlmQueryTreeDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                 ) {
+                    if (rows.isNotEmpty()) {
+                        TextButton(onClick = onClear) {
+                            Text("Clear history (${runs.size})", color = colors.textSecondary)
+                        }
+                    }
                     Button(onClick = onDismiss) {
                         Text("Close")
                     }

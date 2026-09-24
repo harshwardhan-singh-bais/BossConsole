@@ -141,7 +141,9 @@ data class RlmRunResult(
      * The tree as text, for the tool result and for any surface that shows the run.
      *
      * Depth and cost are on the first line on purpose: the caller is an LLM, and a tree
-     * that hit a bound must not look like a tree that finished.
+     * that hit a bound must not look like a tree that finished. The same reasoning applies to
+     * [RlmLimits.MAX_RENDER_CHARS], so hitting *that* bound is stated here too rather than being
+     * left to the host's own tail cut, which would take the deepest nodes with it.
      */
     fun render(): String =
         buildString {
@@ -159,34 +161,57 @@ data class RlmRunResult(
                 append(" was reached, so some queries did not run")
             }
             append('\n')
-            root.renderInto(this, 0)
+            val omitted = root.renderInto(this, 0, RlmLimits.MAX_RENDER_CHARS)
+            if (omitted > 0) {
+                append("RLM: this answer reached its render budget of ")
+                append(RlmLimits.MAX_RENDER_CHARS)
+                append(" characters, so ")
+                append(omitted)
+                append(" node(s) are missing below. Every node that is shown ran; the rest ran too ")
+                append("but did not fit here. The MCP ledger holds each delegate call this run made, ")
+                append("and the operator's RLM tree view holds the whole run.\n")
+            }
         }
 
+    /**
+     * Appends this node and its subtree, and returns how many nodes did not fit in [budget].
+     *
+     * The fit is decided per node, before any of it is written: a half-written node would be worse
+     * than an omitted one, and the count has to be exact for the note that quotes it to be true.
+     * A node is measured with its own lines *and* its text, because the text is the expensive part.
+     */
     private fun RlmNode.renderInto(
         sb: StringBuilder,
         indent: Int,
-    ) {
+        budget: Int,
+    ): Int {
+        val block = StringBuilder()
         val pad = "  ".repeat(indent)
-        sb.append(pad)
-        sb.append(if (isError) "! " else "- ")
-        sb.append(label)
-        sb
+        block.append(pad)
+        block.append(if (isError) "! " else "- ")
+        block.append(label)
+        block
             .append(" [d")
             .append(depth)
             .append(", #")
             .append(id)
             .append(']')
-        delegate?.let { sb.append(" -> ").append(it) }
-        sb.append('\n')
+        delegate?.let { block.append(" -> ").append(it) }
+        block.append('\n')
         text.lineSequence().forEach { line ->
-            sb
+            block
                 .append(pad)
                 .append("    ")
                 .append(line)
                 .append('\n')
         }
-        children.forEach { it.renderInto(sb, indent + 1) }
+        if (sb.length + block.length > budget) return countNodes()
+        sb.append(block)
+        return children.sumOf { it.renderInto(sb, indent + 1, budget) }
     }
+
+    /** This subtree's node count, this node included. */
+    private fun RlmNode.countNodes(): Int = 1 + children.sumOf { it.countNodes() }
 }
 
 /**
@@ -270,11 +295,21 @@ class RlmCodebaseEngine(
                         "nodes. This query did not run. Narrow the tree and try again.",
             )
         }
-        return when (action) {
-            RlmAction.READ_RANGE -> readRange(id, depth, query, cache)
-            RlmAction.GREP -> grep(id, depth, query, cache)
-            RlmAction.LIST_TREE -> listTree(id, depth, query, cache)
-            RlmAction.SUBQUERY -> subquery(id, depth, query, budget, cache)
+        val node =
+            when (action) {
+                RlmAction.READ_RANGE -> readRange(id, depth, query, cache)
+                RlmAction.GREP -> grep(id, depth, query, cache)
+                RlmAction.LIST_TREE -> listTree(id, depth, query, cache)
+                RlmAction.SUBQUERY -> subquery(id, depth, query, budget, cache)
+            }
+        // A leaf action carrying a populated child list is reported, not silently dropped, for the
+        // same reason a typo'd action is refused rather than guessed at: the caller wrote something
+        // this did not do. It is not refused outright - the action itself is valid, and its answer
+        // is still the answer to the question that was asked - but the node says where they went.
+        return if (action != RlmAction.SUBQUERY && query.subqueries.isNotEmpty()) {
+            node.copy(text = IGNORED_CHILDREN_PREFIX + "\n" + node.text)
+        } else {
+            node
         }
     }
 
@@ -497,14 +532,29 @@ class RlmCodebaseEngine(
                 "was not repeated. One policy consult and one ledger record cover both."
 
         /**
+         * Prefixed to the body of a node whose query carried `subqueries` that its action cannot
+         * use. One line, like [CACHE_HIT_PREFIX], and for the same reason: the rendered tree is
+         * the only surface where this can be said, and the caller is the one who wrote them.
+         */
+        const val IGNORED_CHILDREN_PREFIX: String =
+            "RLM: this node carried 'subqueries', which only the SUBQUERY action expands, so they " +
+                "were not run. Send them as separate queries, or nest them under a SUBQUERY."
+
+        /**
          * 1-based, inclusive, and tolerant of a range that runs past the end of the text.
          *
          * Past-the-end is not clamped silently: a caller that asked for lines 4000-4100 of a
          * file the delegate returned 900 lines of needs to know it got a partial answer
          * because `codebase_read` truncates, not because the file ends there.
+         *
+         * An inverted range is reported for the same reason, and it is the one case that would
+         * otherwise be silent: `coerceIn` turns `3..1` into `subList(2, 2)`, which joins to the
+         * empty string - indistinguishable from a file with no lines in that range. An LLM
+         * writing the two bounds the wrong way round is not exotic.
          */
-        // Fast path, unreachable-range report and the slice are three returns; the guard
-        // clauses keep the actual slicing arithmetic at the end, flat and readable.
+        // Fast path, inverted-range report, unreachable-range report and the slice are four
+        // returns; the guard clauses keep the actual slicing arithmetic at the end, flat and
+        // readable.
         @Suppress("ReturnCount")
         fun sliceLines(
             text: String,
@@ -512,6 +562,10 @@ class RlmCodebaseEngine(
             endLine: Int,
         ): String {
             if (startLine <= 1 && endLine == Int.MAX_VALUE) return text
+            if (endLine < startLine) {
+                return "RLM: the range ${rangeLabel(startLine, endLine)} is inverted - endLine comes " +
+                    "before startLine, so no lines can be returned. Send startLine <= endLine."
+            }
             val lines = text.lineSequence().toList()
             if (startLine > lines.size) {
                 return "RLM: asked for lines ${rangeLabel(startLine, endLine)} but the delegate " +

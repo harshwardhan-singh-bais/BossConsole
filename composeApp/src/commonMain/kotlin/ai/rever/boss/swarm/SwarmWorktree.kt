@@ -56,8 +56,10 @@ data class SwarmWorktreeStats(
  * [ownerWindowId] is load bearing rather than bookkeeping. Tab and Space registries in BOSS are per
  * window, so worktree state cannot be assumed to follow a tab into another window. The swarm layer
  * therefore treats a worktree as owned by the window that spawned it and does not try to reconcile
- * it anywhere else. This is a stated limitation of the first cut, not an oversight; see the PR
- * description.
+ * it anywhere else: a second window shows no entry for a worktree it did not spawn, even though that
+ * worktree exists on disk and in the shared journal. That limit is stated here, next to the field it
+ * constrains, rather than in a document this KDoc would have to point at - a pointer that can go
+ * stale is not a statement of the limitation.
  *
  * [terminalTabId] and [spaceId] are nullable because a worktree exists on disk from the moment
  * `git worktree add` succeeds, which is before any tab or Space has been created for it. A worktree

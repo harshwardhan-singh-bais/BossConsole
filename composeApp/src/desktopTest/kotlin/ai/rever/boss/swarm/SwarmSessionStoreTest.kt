@@ -1,5 +1,9 @@
 package ai.rever.boss.swarm
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
@@ -129,11 +133,12 @@ class SwarmSessionStoreTest {
         val store = SwarmSessionStore(file)
         store.save(listOf(session("a"), session("b"), session("c")))
 
-        val written = store.upsert(session("b", task = "revised task"))
+        val written = runBlocking { store.upsert(session("b", task = "revised task")) }
 
-        assertEquals(listOf("a", "b", "c"), written.map { it.id }, "order must be preserved")
-        assertEquals("revised task", written[1].task, "the existing entry must be replaced")
-        assertEquals(written, store.load(), "the journal on disk must match what was returned")
+        assertNull(written.error, "a writable journal must report no write failure")
+        assertEquals(listOf("a", "b", "c"), written.sessions.map { it.id }, "order must be preserved")
+        assertEquals("revised task", written.sessions[1].task, "the existing entry must be replaced")
+        assertEquals(written.sessions, store.load(), "the journal on disk must match what was returned")
     }
 
     @Test
@@ -142,10 +147,75 @@ class SwarmSessionStoreTest {
         val store = SwarmSessionStore(file)
         store.save(listOf(session("a")))
 
-        val written = store.upsert(session("b"))
+        val written = runBlocking { store.upsert(session("b")) }
 
-        assertEquals(listOf("a", "b"), written.map { it.id })
+        assertEquals(listOf("a", "b"), written.sessions.map { it.id })
         assertEquals(2, store.load().size)
+    }
+
+    @Test
+    fun `an upsert that cannot be written reports it, and still hands back the journal`() {
+        // A directory where the journal belongs, so the replace cannot land. The point of the case
+        // is the return value: a caller that got the merged list with no failure would read it as
+        // "this is on disk now", and the fault flow is not something every caller collects.
+        val dir = kotlin.io.path.createTempDirectory("swarm-store-unwritable").toFile()
+        tempFiles.add(File(dir, "swarm-sessions.json"))
+        val unwritable = File(dir, "swarm-sessions.json").apply { mkdirs() }
+        val store = SwarmSessionStore(unwritable)
+
+        val written = runBlocking { store.upsert(session("a")) }
+
+        assertNotNull(written.error, "a failed write must be reported rather than dropped")
+        assertEquals(listOf("a"), written.sessions.map { it.id }, "the caller still gets the journal it asked for")
+        assertTrue(
+            store.fault.value is SwarmStoreFault.Unwritable,
+            "the fault must name the write: ${store.fault.value}",
+        )
+    }
+
+    @Test
+    fun `concurrent upserts do not lose a session`() {
+        val file = createTempJournalFile()
+        val store = SwarmSessionStore(file)
+        val ids = (1..8).map { "session-$it" }
+
+        runBlocking {
+            ids.map { id -> async(Dispatchers.IO) { store.upsert(session(id)) } }.awaitAll()
+        }
+
+        // Uncoupled, load-mutate-save would have two callers read the same journal and each write
+        // their own version, so a session disappears - and the first real caller of this is an
+        // orchestrator polling per-worktree stats, which is exactly concurrent upserts.
+        assertEquals(ids.sorted(), store.load().map { it.id }.sorted())
+    }
+
+    @Test
+    fun `a successful read stops reporting a read fault, but never a write fault`() {
+        val file = createTempJournalFile()
+        val store = SwarmSessionStore(file)
+        file.writeText("{ this is not a journal")
+        store.load()
+        assertTrue(store.fault.value is SwarmStoreFault.Unreadable, "${store.fault.value}")
+
+        // Repairing the file is what an operator does next, and reading is what the UI repeats:
+        // a store that kept reporting Unreadable until something wrote would be describing a file
+        // it has already read successfully.
+        file.writeText("""{"version": 1, "sessions": []}""")
+        assertEquals(emptyList(), store.load())
+        assertNull(store.fault.value, "a repaired journal must not keep reading as unreadable")
+
+        // An Unwritable is the opposite case: parsing the file says nothing about whether the write
+        // that failed has since landed, so a read must leave it standing.
+        val dir = kotlin.io.path.createTempDirectory("swarm-store-still-unwritable").toFile()
+        tempFiles.add(File(dir, "swarm-sessions.json"))
+        val unwritable = File(dir, "swarm-sessions.json").apply { mkdirs() }
+        val broken = SwarmSessionStore(unwritable)
+        assertNotNull(broken.save(emptyList()), "writing over a directory must fail")
+        broken.load()
+        assertTrue(
+            broken.fault.value is SwarmStoreFault.Unwritable,
+            "a read cannot clear a write failure: ${broken.fault.value}",
+        )
     }
 
     @Test

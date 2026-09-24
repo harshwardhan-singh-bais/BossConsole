@@ -1,5 +1,6 @@
 package ai.rever.boss.mcp.rlm
 
+import ai.rever.boss.mcp.MAX_MCP_RESULT_CHARS
 import kotlinx.serialization.Serializable
 
 /**
@@ -95,13 +96,47 @@ object RlmLimits {
     /** Per-node output cap, so one delegate's answer cannot crowd out the rest of the tree. */
     const val MAX_NODE_CHARS: Int = 8_000
 
+    /**
+     * Ceiling on the rendered tree, and the reason [MAX_NODES] x [MAX_NODE_CHARS] does not have to
+     * stay under the host's own limit for a whole tool result.
+     *
+     * The registry caps every result at `MAX_MCP_RESULT_CHARS` and cuts it from the *tail*, which is
+     * the wrong end for a tree: the deepest nodes are the ones that answer the question, and they
+     * are exactly what a silent tail cut removes. Worse, the cut marker would land after a header
+     * that only ever mentions the node budget, so a reader could not tell which bound they hit.
+     * This stops the render while nodes are still being written and says how many it left out.
+     *
+     * Derived from the host's ceiling rather than written as a second number, because two
+     * independent ceilings for one product is the failure this constant exists to prevent. The
+     * headroom covers the tree's own per-node lines plus the note this bound appends.
+     */
+    const val MAX_RENDER_CHARS: Int = MAX_MCP_RESULT_CHARS - 10_000
+
+    /**
+     * How deep a *payload* this tool will parse, as opposed to how deep it will execute
+     * ([MAX_DEPTH]).
+     *
+     * The two are different numbers on purpose. Execution is capped at [MAX_DEPTH] and a deeper
+     * node is refused with a reason, which is more informative than rejecting the whole call - so
+     * the parser has to accept trees the engine will never fully run. It only has to be low enough
+     * that the decoder's own recursion, which is one stack frame per nesting level, cannot exhaust
+     * the stack: a `StackOverflowError` is an [Error], not an [Exception], so it would escape the
+     * handler that turns every other malformed request into a named result.
+     */
+    const val MAX_WIRE_DEPTH: Int = 32
+
     /** `project_search` default when the caller does not say. */
     const val DEFAULT_GREP_RESULTS: Int = 50
 
     /**
-     * RLM's own ceiling on `maxResults`, well under `project_search`'s own 2,000: the
-     * delegate's answer is re-sent as cached prefix on every later request for the rest of
-     * the session, so a large grep is a recurring cost, not a one-off.
+     * RLM's own ceiling on `maxResults`, well under `project_search`'s own 2,000.
+     *
+     * Two reasons, and neither is the delegate cache - that cache lives for one `run()` and is
+     * gone by the next call. The matches land in this run's rendered tree, and the tree is a tool
+     * result: it stays in the conversation for the rest of the session and is re-sent as cached
+     * prefix on every later request, so a large grep is a recurring cost rather than a one-off.
+     * And past the point a single node can carry ([MAX_NODE_CHARS]) the extra matches are cut from
+     * the node anyway, so asking for more only buys search work whose answer is discarded.
      */
     const val MAX_GREP_RESULTS: Int = 200
 }

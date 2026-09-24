@@ -607,7 +607,13 @@ private fun RlmStatusItem() {
         onClick = { showTrees = true },
     )
     if (showTrees) {
-        RlmQueryTreeDialog(runs = runs, onDismiss = { showTrees = false })
+        RlmQueryTreeDialog(
+            runs = runs,
+            onDismiss = { showTrees = false },
+            // The dialog shows this row's own log, so clearing it is the same act as the row
+            // disappearing - and the dialog stays open, showing its empty state.
+            onClear = { RlmToolProvider.runLog.clear() },
+        )
     }
 }
 

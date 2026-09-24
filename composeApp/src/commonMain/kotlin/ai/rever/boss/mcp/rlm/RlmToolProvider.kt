@@ -79,7 +79,8 @@ object RlmToolProvider : McpToolProvider {
                     "Query the codebase recursively from the host, in one governed call. Actions: " +
                         "READ_RANGE (a file's lines), GREP (find in files), LIST_TREE (a directory tree), " +
                         "SUBQUERY (nest any of these under one node). The whole tree runs host-side under " +
-                        "one depth cap (3) and one node budget (24), and every sub-call is policy-checked " +
+                        "one depth cap (${RlmLimits.MAX_DEPTH}) and a node budget of " +
+                        "${RlmLimits.MAX_NODES}, and every sub-call is policy-checked " +
                         "and recorded in the MCP ledger individually. Returns the executed tree with its " +
                         "depth and cost. Read-only. " +
                         SWARM_CONTEXT_HINT,
@@ -99,6 +100,16 @@ object RlmToolProvider : McpToolProvider {
      */
     private suspend fun handle(args: McpToolArgs): McpToolResult =
         withContext(Dispatchers.IO) {
+            // Before the decoder sees the payload, because a request nested deeply enough would
+            // fail while *parsing*: see [nestingExceeds].
+            if (nestingExceeds(args.raw)) {
+                return@withContext McpToolResult(
+                    "$TOOL_NAME received a request nested deeper than ${RlmLimits.MAX_WIRE_DEPTH} " +
+                        "levels, which it will not parse. Execution is capped at " +
+                        "${RlmLimits.MAX_DEPTH} levels, so send a flatter tree.",
+                    isError = true,
+                )
+            }
             val request =
                 try {
                     requestJson.decodeFromString<RlmQuery>(args.raw)
@@ -108,6 +119,12 @@ object RlmToolProvider : McpToolProvider {
                     return@withContext parseFailureResult(e)
                 } catch (e: IllegalArgumentException) {
                     // kotlinx raises this for malformed JSON content on some paths; same answer.
+                    return@withContext parseFailureResult(e)
+                } catch (e: StackOverflowError) {
+                    // Unreachable behind [nestingExceeds], and kept anyway: the decoder's recursion
+                    // depth is the caller's to choose, and an Error that escapes this handler does
+                    // not come back as a result - it goes out through the MCP server. If this ever
+                    // fires, the request is still answered by name instead of taking the server down.
                     return@withContext parseFailureResult(e)
                 }
             val run = RlmCodebaseEngine(invoker = RegistryRlmToolInvoker).run(request)
@@ -123,7 +140,7 @@ object RlmToolProvider : McpToolProvider {
      * The one answer a malformed request can get: named, not silent, and never confused
      * with a query that ran and found nothing.
      */
-    private fun parseFailureResult(e: Exception): McpToolResult =
+    private fun parseFailureResult(e: Throwable): McpToolResult =
         McpToolResult(
             "$TOOL_NAME could not parse its arguments: ${e.message ?: e::class.simpleName}. " +
                 "Expected a JSON object with an 'action' field.",
@@ -144,6 +161,20 @@ object RlmToolProvider : McpToolProvider {
         ): McpToolResult = McpToolRegistryImpl.invoke(toolName, argumentsJson)
     }
 
+    /**
+     * The tool's input schema.
+     *
+     * `subqueries` is described here rather than expressed as a recursive `"$ref": "#"`. A
+     * self-reference is the accurate way to write the shape, but this schema is what a *client*
+     * validates against before calling, and a client that cannot resolve a local ref would lose the
+     * whole tool rather than lose one validation. The recursion is therefore enforced where it
+     * cannot be skipped: the host parses the children, refuses an unknown action, refuses a payload
+     * nested deeper than [RlmLimits.MAX_WIRE_DEPTH], and reports a `subqueries` list on a leaf
+     * action instead of dropping it.
+     *
+     * Every number in it comes from [RlmLimits] (and the engine's own [RlmCodebaseEngine.MAX_TREE_DEPTH]),
+     * so the contract an agent reads cannot drift from the engine that enforces it.
+     */
     private val QUERY_SCHEMA =
         """
         {
@@ -177,20 +208,67 @@ object RlmToolProvider : McpToolProvider {
             },
             "maxResults": {
               "type": "integer",
-              "description": "GREP: cap on matches. Defaults to 50, clamped to 1..200."
+              "description":
+                "GREP: cap on matches. Defaults to ${RlmLimits.DEFAULT_GREP_RESULTS}, clamped to 1..${RlmLimits.MAX_GREP_RESULTS}."
             },
             "treeDepth": {
               "type": "integer",
-              "description": "LIST_TREE: directory depth. Defaults to 2, clamped to 1..6."
+              "description":
+                "LIST_TREE: directory depth. Omitted means the delegate's own default rather than a value chosen here; clamped to 1..${RlmCodebaseEngine.MAX_TREE_DEPTH} when given."
             },
             "subqueries": {
               "type": "array",
               "items": { "type": "object" },
               "description":
-                "SUBQUERY: child queries, each an object of this same shape. Nesting is capped at depth 3 and the whole call at 24 nodes."
+                "SUBQUERY: child queries, each an object of this same shape, checked by the host at run time rather than by this schema. Only SUBQUERY expands them: a leaf action that carries the field runs as if it were absent and says so in its node. The whole call is capped at depth ${RlmLimits.MAX_DEPTH} and ${RlmLimits.MAX_NODES} nodes, and a payload nested deeper than ${RlmLimits.MAX_WIRE_DEPTH} levels is refused without being parsed."
             }
           },
           "required": ["action"]
         }
         """.trimIndent()
+}
+
+/**
+ * Whether [raw] nests deeper than [limit] levels - braces *and* brackets, since either nests.
+ *
+ * This runs before the decoder, and it exists because the decoder recurses once per nesting level:
+ * a request carrying thousands of nested `subqueries` objects raises a `StackOverflowError` while
+ * *parsing*, and that is an [Error] rather than an [Exception], so it would bypass the handler's
+ * catch clauses and go out through the MCP server. Counting brackets is one O(n) pass over a string
+ * already in hand, and it is the difference between a named refusal and a crash.
+ *
+ * [RlmLimits.MAX_WIRE_DEPTH] is deliberately looser than [RlmLimits.MAX_DEPTH]: a tree deeper than
+ * the engine will run is still worth parsing, because the engine refuses the over-deep node with a
+ * reason, which tells the caller more than rejecting the whole call would.
+ *
+ * String literals are skipped, so a query or a path containing a brace is not counted as nesting.
+ * An unterminated literal is left to the decoder to report: it means the rest of the payload is not
+ * counted, which can only make this guard refuse less, never wrongly more.
+ */
+internal fun nestingExceeds(
+    raw: String,
+    limit: Int = RlmLimits.MAX_WIRE_DEPTH,
+): Boolean {
+    var depth = 0
+    var inString = false
+    var escaped = false
+    for (c in raw) {
+        if (inString) {
+            when {
+                escaped -> escaped = false
+                c == '\\' -> escaped = true
+                c == '"' -> inString = false
+            }
+            continue
+        }
+        when (c) {
+            '"' -> inString = true
+            '{', '[' -> {
+                depth += 1
+                if (depth > limit) return true
+            }
+            '}', ']' -> depth = (depth - 1).coerceAtLeast(0)
+        }
+    }
+    return false
 }

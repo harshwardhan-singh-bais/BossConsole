@@ -1,5 +1,6 @@
 package ai.rever.boss.mcp.rlm
 
+import ai.rever.boss.mcp.MAX_MCP_RESULT_CHARS
 import ai.rever.boss.plugin.api.McpToolResult
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -289,6 +290,103 @@ class RlmEngineTest {
         assertTrue(RlmCodebaseEngine.sliceLines(text, 9, 12).contains("only 4 line(s)"))
     }
 
+    @Test
+    fun `sliceLines reports an inverted range rather than returning nothing`() {
+        val text = "a\nb\nc\nd"
+
+        // coerceIn folds 3..1 to subList(2, 2), which joins to the empty string - the one case that
+        // would otherwise be silent, and indistinguishable from a file with no lines in that range.
+        val inverted = RlmCodebaseEngine.sliceLines(text, 3, 1)
+        assertTrue(inverted.contains("inverted"), inverted)
+        assertTrue(inverted.contains("3..1"), inverted)
+
+        // The same shape one step off: an end bound that is not a line number at all.
+        val zeroEnd = RlmCodebaseEngine.sliceLines(text, 2, 0)
+        assertTrue(zeroEnd.contains("inverted"), zeroEnd)
+    }
+
+    @Test
+    fun `READ_RANGE with the bounds the wrong way round says so on the node`() =
+        runBlocking {
+            val invoker = RecordingInvoker { McpToolResult((1..10).joinToString("\n") { "l$it" }) }
+            val run =
+                RlmCodebaseEngine(invoker).run(
+                    RlmQuery(action = "READ_RANGE", path = "A.kt", startLine = 6, endLine = 2),
+                )
+
+            assertTrue(run.root.text.contains("inverted"), run.root.text)
+            assertFalse(
+                run.root.text.isBlank(),
+                "an empty body is the failure this guards: the node must say why it is empty",
+            )
+        }
+
+    @Test
+    fun `subqueries on a leaf action are reported rather than dropped in silence`() =
+        runBlocking {
+            val invoker = RecordingInvoker()
+            val run =
+                RlmCodebaseEngine(invoker).run(
+                    RlmQuery(
+                        action = "GREP",
+                        query = "x",
+                        subqueries = listOf(RlmQuery(action = "LIST_TREE")),
+                    ),
+                )
+
+            // The action itself is valid, so it still runs and its answer is still the answer -
+            // but the caller wrote children that did nothing, and that is what the node says.
+            assertEquals(1, invoker.calls.size)
+            assertFalse(run.root.isError)
+            assertTrue(run.root.text.contains("'subqueries'"), run.root.text)
+            assertTrue(run.root.text.contains("SUBQUERY"), run.root.text)
+            assertTrue(run.render().contains("were not run"), run.render())
+        }
+
+    @Test
+    fun `a payload nested past the wire cap is refused before the decoder sees it`() {
+        // Thousands of levels is what makes the decoder's own recursion raise StackOverflowError -
+        // an Error, so it would bypass the handler's catches and leave through the MCP server. The
+        // guard is plain string work, so it can be pinned without involving a decoder at all.
+        val nested = "{\"action\":\"SUBQUERY\",\"subqueries\":["
+        val deep = nested.repeat(2_000) + "]".repeat(2_000) + "}"
+
+        assertTrue(nestingExceeds(deep), "a payload this deep must be refused before it is parsed")
+        assertFalse(nestingExceeds("""{"action":"SUBQUERY","subqueries":[{"action":"LIST_TREE"}]}"""))
+        // Braces inside a string literal are content: a GREP for "{{{" is not nesting.
+        assertFalse(nestingExceeds("""{"action":"GREP","query":"${"{".repeat(64)}"}"""))
+        // The wire cap is deliberately looser than the execution cap, so a tree the engine will
+        // only partly run still parses and gets per-node refusals with reasons.
+        assertTrue(RlmLimits.MAX_WIRE_DEPTH > RlmLimits.MAX_DEPTH)
+        assertFalse(nestingExceeds("""{"action":"LIST_TREE"}""", limit = 2))
+        assertTrue(nestingExceeds("""{"a":{"b":{"c":1}}}""", limit = 2))
+    }
+
+    @Test
+    fun `a maxed-out tree renders under the host cap and says what it left out`() =
+        runBlocking {
+            // The worst case the limits allow: MAX_NODES nodes each carrying MAX_NODE_CHARS, whose
+            // product is larger than the host's cap for a whole result. That cap cuts from the tail,
+            // so without a render budget the deepest nodes - the ones that answer the question -
+            // would disappear, and the header would blame the node budget for it.
+            val body = "x".repeat(RlmLimits.MAX_NODE_CHARS)
+            val invoker = RecordingInvoker { McpToolResult(body) }
+            val run =
+                RlmCodebaseEngine(invoker).run(
+                    RlmQuery(
+                        action = "SUBQUERY",
+                        subqueries = (1..RlmLimits.MAX_NODES).map { RlmQuery(action = "LIST_TREE", path = "dir$it") },
+                    ),
+                )
+
+            val text = run.render()
+
+            assertTrue(text.length <= MAX_MCP_RESULT_CHARS, "rendered ${text.length} characters")
+            assertTrue(text.contains("render budget"), text.take(400))
+            assertTrue(text.contains("missing below"), text.take(400))
+            assertTrue(text.startsWith("RLM query tree - "), text.take(120))
+        }
+
     // ------------------------------------------------------------------
     // The registered tool
     // ------------------------------------------------------------------
@@ -304,6 +402,22 @@ class RlmEngineTest {
         assertTrue(def.readOnly)
         assertTrue(def.inputSchema.contains("SUBQUERY"))
         assertTrue(def.inputSchema.contains("\"required\": [\"action\"]"))
+    }
+
+    @Test
+    fun `the schema does not promise a default the engine never sends`() {
+        val schema = RlmToolProvider.tools().single().inputSchema
+
+        // The engine omits `treeDepth` when the caller does not name one, so the value that applies
+        // is `codebase_tree`'s own default - a constant in a repository nothing here links against.
+        // "Defaults to 2" would be a promise this side cannot keep, which is worse than saying whose
+        // default it is.
+        assertFalse(schema.contains("Defaults to 2"), schema)
+        assertTrue(schema.contains("delegate's own default"), schema)
+        // A payload deeper than the engine will execute is still parsed and refused per node, so the
+        // wire cap has to be stated, and it has to stay looser than the execution cap.
+        assertTrue(schema.contains(RlmLimits.MAX_WIRE_DEPTH.toString()), schema)
+        assertTrue(RlmLimits.MAX_WIRE_DEPTH > RlmLimits.MAX_DEPTH)
     }
 
     @Test

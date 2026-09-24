@@ -7,6 +7,8 @@ import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -48,6 +50,22 @@ sealed interface SwarmStoreFault {
 }
 
 /**
+ * What an [SwarmSessionStore.upsert] did: the journal as it now stands, and the write failure if it
+ * could not be persisted.
+ *
+ * Both halves are returned, because either one alone would mislead. The list alone says a write
+ * landed that may not have, and the failure alone leaves the caller with no journal to read. [error]
+ * is exactly what [SwarmSessionStore.save] returns, so a write failure is reported in the same words
+ * whichever path hit it.
+ */
+data class SwarmUpsertResult(
+    /** The journal including the upserted session, whether or not it reached disk. */
+    val sessions: List<SwarmSession>,
+    /** Non-null when the write failed; [sessions] is then what the journal *should* hold. */
+    val error: String?,
+)
+
+/**
  * Reads and writes the swarm session journal at `~/.boss/swarm-sessions.json`.
  *
  * Follows the persistence shape the rest of `~/.boss` already uses: a nullable file so the store can
@@ -85,8 +103,19 @@ class SwarmSessionStore(
 
     private val _fault = MutableStateFlow<SwarmStoreFault?>(null)
 
-    /** Set when the journal could not be read or written. Cleared by the next successful write. */
+    /**
+     * Set when the journal could not be read or written.
+     *
+     * Cleared by whatever proves it false, not by "the next write" alone: a successful read clears an
+     * [SwarmStoreFault.Unreadable], and a successful write clears either kind. An
+     * [SwarmStoreFault.Unwritable] deliberately survives a read - parsing the file says nothing about
+     * whether the write that failed has since landed, and a store that forgot a failed write because
+     * someone read the old contents would be reporting a journal state it does not have.
+     */
     val fault: StateFlow<SwarmStoreFault?> = _fault.asStateFlow()
+
+    /** Serializes the read-modify-write in [upsert] against other upserts. */
+    private val writeLock = Mutex()
 
     /**
      * Every session in the journal, oldest first.
@@ -94,12 +123,22 @@ class SwarmSessionStore(
      * An absent file is an empty journal, because that is what a first run looks like. A file that
      * exists but does not parse is a fault: this returns empty so the caller has something usable,
      * and [fault] carries the reason so the emptiness is not mistaken for fact.
+     *
+     * A read that succeeds clears an [SwarmStoreFault.Unreadable] - including the read that finds no
+     * file at all, since a journal that has been moved aside is no longer unreadable, and this is the
+     * call a UI makes repeatedly while it is on screen.
      */
     @Suppress("TooGenericExceptionCaught") // A journal fault is reported, not thrown at the UI.
     fun load(): List<SwarmSession> {
-        val file = storeFile?.takeIf { it.exists() } ?: return emptyList()
+        val file = storeFile?.takeIf { it.exists() }
+        if (file == null) {
+            clearUnreadableFault()
+            return emptyList()
+        }
         return try {
-            json.decodeFromString<SwarmSessionsDocument>(file.readText()).sessions
+            val sessions = json.decodeFromString<SwarmSessionsDocument>(file.readText()).sessions
+            clearUnreadableFault()
+            sessions
         } catch (t: Exception) {
             val error = t.message ?: t::class.simpleName ?: "unknown error"
             _fault.value = SwarmStoreFault.Unreadable(file.path, error)
@@ -110,6 +149,16 @@ class SwarmSessionStore(
             )
             emptyList()
         }
+    }
+
+    /**
+     * Drops a read fault, which a read that just succeeded has disproved.
+     *
+     * Only [SwarmStoreFault.Unreadable] is cleared: an [SwarmStoreFault.Unwritable] is about a write
+     * that still may not have landed, and reading the file cannot answer that.
+     */
+    private fun clearUnreadableFault() {
+        if (_fault.value is SwarmStoreFault.Unreadable) _fault.value = null
     }
 
     /**
@@ -140,21 +189,29 @@ class SwarmSessionStore(
     }
 
     /**
-     * Inserts or replaces [session] by id and returns the journal as written.
+     * Inserts or replaces [session] by id, and reports the journal alongside the write failure.
      *
      * Order is preserved rather than re-sorted, so the journal reads as a history of what the
      * operator started and when, which is the only ordering anyone has ever wanted from it.
+     *
+     * The failure is returned rather than dropped, because a caller that got the merged list back
+     * with no error would reasonably read it as "this is on disk now", and [fault] is only visible to
+     * whatever is collecting it. [writeLock] covers the whole read-modify-write: two concurrent
+     * callers would otherwise each read the same journal and each write their own version, silently
+     * losing one session. The first caller of this is an orchestrator polling per-worktree git stats,
+     * which is exactly concurrent upserts, so the lock is not speculative. It is held across [load]
+     * and [save] only, never across caller code.
      */
-    fun upsert(session: SwarmSession): List<SwarmSession> {
-        val existing = load()
-        val index = existing.indexOfFirst { it.id == session.id }
-        val updated =
-            if (index >= 0) {
-                existing.toMutableList().also { it[index] = session }
-            } else {
-                existing + session
-            }
-        save(updated)
-        return updated
-    }
+    suspend fun upsert(session: SwarmSession): SwarmUpsertResult =
+        writeLock.withLock {
+            val existing = load()
+            val index = existing.indexOfFirst { it.id == session.id }
+            val updated =
+                if (index >= 0) {
+                    existing.toMutableList().also { it[index] = session }
+                } else {
+                    existing + session
+                }
+            SwarmUpsertResult(sessions = updated, error = save(updated))
+        }
 }
