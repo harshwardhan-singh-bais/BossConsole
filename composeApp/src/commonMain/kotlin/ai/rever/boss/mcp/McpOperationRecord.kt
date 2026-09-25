@@ -102,10 +102,11 @@ data class McpOperationRecord(
  *
  * Every field except [McpOperationRecord.hash] and [McpOperationRecord.parentHash] is covered here,
  * and `McpLedgerChainTest` pins that by deriving the expected key set from the serializer
- * descriptor rather than from a hand-kept list. The consequence worth knowing: adding a field here
- * changes the canonical form of records already on disk, so a ledger written by an older build
- * reports its retained records as *altered* rather than as *unverifiable*. That is the price of
- * covering a new field, and it is why a field is added here only when the audit trail needs it.
+ * descriptor rather than from a hand-kept list. Coverage does not mean unconditional emission: a
+ * field that is only meaningful sometimes is written only when it is set, so a record that does not
+ * carry it hashes exactly as it did before the field existed. That is the rule that keeps a ledger
+ * written by an older build verifying as *intact* rather than reading every retained record as
+ * *altered*, and it is why an optional field is added here behind that condition.
  */
 internal fun McpOperationRecord.canonicalFormForHashing(): String =
     buildJsonObject {
@@ -121,9 +122,18 @@ internal fun McpOperationRecord.canonicalFormForHashing(): String =
             "sanitizedArgs",
             buildJsonObject { sanitizedArgs.toSortedMap().forEach { (key, value) -> put(key, value) } },
         )
-        put("colonyThreadId", colonyThreadId)
-        put("colonyMessageId", colonyMessageId)
         put("errorSnippet", errorSnippet)
+        // Optional fields are written only when set, so a record that does not carry them hashes
+        // exactly as it did before the field existed. That is what keeps an existing audit trail
+        // verifying: emitting a field unconditionally would change the canonical form of every
+        // historical record and make a ledger written by an older build read as *altered* rather
+        // than as intact, so a new field is only ever appended here behind this rule.
+        if (colonyThreadId != null) {
+            put("colonyThreadId", colonyThreadId)
+        }
+        if (colonyMessageId != null) {
+            put("colonyMessageId", colonyMessageId)
+        }
         if (secretRefs.isNotEmpty()) {
             put("secretRefs", JsonArray(secretRefs.map(::JsonPrimitive)))
         }
